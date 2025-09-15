@@ -762,7 +762,7 @@ window.addEventListener('resize', () => {
 // Start the application
 Promise.all([
     loadImageData('./Matrix_CMYK_Logo.png'),
-    loadImageData('./Delta_logo.png')
+    loadImageData('./Delta_Logo.png')
 ]).then(([matrixData, deltaData]) => {
     initGPGPU();
     initParticles(matrixData, deltaData);
