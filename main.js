@@ -30,7 +30,6 @@ const config = {
 };
 config.particleCount = config.textureSize * config.textureSize;
 
-
 // State
 let currentLogo = 'matrix';
 let isMorphing = false;
@@ -159,10 +158,14 @@ function initGPGPU() {
     gpgpu.simulationUniforms.morphSpeed.value = config.morphSpeed;
     gpgpu.simulationUniforms.deltaTime.value = 0;
     gpgpu.simulationUniforms.isMorphing.value = false;
-    gpgpu.simulationUniforms.positions.value = gpgpu.positionTextures[0];
-    gpgpu.simulationUniforms.velocities.value = gpgpu.velocityTextures[0];
     gpgpu.simulationUniforms.isIdle.value = true;
     gpgpu.simulationUniforms.isFlocking.value = false;
+    gpgpu.simulationUniforms.separationDistance.value = config.separationDistance;
+    gpgpu.simulationUniforms.alignmentDistance.value = config.alignmentDistance;
+    gpgpu.simulationUniforms.cohesionDistance.value = config.cohesionDistance;
+    gpgpu.simulationUniforms.freedomFactor.value = config.freedomFactor;
+    gpgpu.simulationUniforms.bounds.value = config.bounds;
+    gpgpu.simulationUniforms.speedLimit.value = config.speedLimit;
     
     // Simulation materials
     gpgpu.velocityMaterial = new THREE.ShaderMaterial({
@@ -256,7 +259,7 @@ const velocityFragmentShader = `
 
     const float PI = 3.141592653589793;
     const float PI_2 = PI * 2.0;
-    const float textureSize = ${config.textureSize}.0;
+    const float textureSize = ${config.textureSize.toFixed(1)};
 
     float zoneRadius = 40.0;
     float zoneRadiusSquared = 1600.0;
@@ -310,47 +313,48 @@ const velocityFragmentShader = `
                 vel -= normalize(pos) * deltaTime * 5.0;
             }
 
-            // Sample neighboring particles
-            for (float y = 0.0; y < textureSize; y += 4.0) {
-                for (float x = 0.0; x < textureSize; x += 4.0) {
-                    vec2 ref = vec2(x + 0.5, y + 0.5) / textureSize;
-                    
-                    // Skip self
-                    if (distance(ref, vUv) < 0.001) continue;
-                    
-                    vec3 otherPos = texture2D(positions, ref).xyz;
-                    vec3 otherVel = texture2D(velocities, ref).xyz;
-                    
-                    vec3 dir = otherPos - pos;
-                    float dist = length(dir);
-                    
-                    if (dist < 0.0001) continue;
-                    
-                    float distSquared = dist * dist;
-                    
-                    if (distSquared > zoneRadiusSquared) continue;
-                    
-                    float percent = distSquared / zoneRadiusSquared;
-                    
-                    // Separation
-                    if (percent < separationThresh) {
-                        float f = (separationThresh / percent - 1.0) * deltaTime;
-                        vel -= normalize(dir) * f;
-                    } 
-                    // Alignment
-                    else if (percent < alignmentThresh) {
-                        float threshDelta = alignmentThresh - separationThresh;
-                        float adjustedPercent = (percent - separationThresh) / threshDelta;
-                        float f = (0.5 - cos(adjustedPercent * PI_2) * 0.5 + 0.5) * deltaTime;
-                        vel += normalize(otherVel) * f;
-                    } 
-                    // Cohesion
-                    else {
-                        float threshDelta = 1.0 - alignmentThresh;
-                        float adjustedPercent = (threshDelta == 0.0) ? 1.0 : (percent - alignmentThresh) / threshDelta;
-                        float f = (0.5 - (cos(adjustedPercent * PI_2) * -0.5 + 0.5)) * deltaTime;
-                        vel += normalize(dir) * f;
-                    }
+            // Sample neighboring particles (optimized - only sample a few)
+            for (float i = 0.0; i < 16.0; i += 1.0) {
+                float x = mod(i, 4.0);
+                float y = floor(i / 4.0);
+                vec2 ref = vUv + vec2((x - 1.5) / textureSize, (y - 1.5) / textureSize);
+                
+                // Skip self and out of bounds
+                if (distance(ref, vUv) < 0.001 || 
+                    ref.x < 0.0 || ref.x > 1.0 || ref.y < 0.0 || ref.y > 1.0) continue;
+                
+                vec3 otherPos = texture2D(positions, ref).xyz;
+                vec3 otherVel = texture2D(velocities, ref).xyz;
+                
+                vec3 dir = otherPos - pos;
+                float dist = length(dir);
+                
+                if (dist < 0.0001) continue;
+                
+                float distSquared = dist * dist;
+                
+                if (distSquared > zoneRadiusSquared) continue;
+                
+                float percent = distSquared / zoneRadiusSquared;
+                
+                // Separation
+                if (percent < separationThresh) {
+                    float f = (separationThresh / percent - 1.0) * deltaTime;
+                    vel -= normalize(dir) * f;
+                } 
+                // Alignment
+                else if (percent < alignmentThresh) {
+                    float threshDelta = alignmentThresh - separationThresh;
+                    float adjustedPercent = (percent - separationThresh) / threshDelta;
+                    float f = (0.5 - cos(adjustedPercent * PI_2) * 0.5 + 0.5) * deltaTime;
+                    vel += normalize(otherVel) * f;
+                } 
+                // Cohesion
+                else {
+                    float threshDelta = 1.0 - alignmentThresh;
+                    float adjustedPercent = (threshDelta == 0.0) ? 1.0 : (percent - alignmentThresh) / threshDelta;
+                    float f = (0.5 - (cos(adjustedPercent * PI_2) * -0.5 + 0.5)) * deltaTime;
+                    vel += normalize(dir) * f;
                 }
             }
 
@@ -466,6 +470,7 @@ function loadImageData(url) {
         }, undefined, reject);
     });
 }
+
 function processLogoData(data, logoType) {
     const points = [];
     const dataArray = data.data;
@@ -592,6 +597,10 @@ function initParticles(matrixData, deltaData) {
     gpgpu.renderUniforms.positions.value = gpgpu.positionTargets[0].texture;
     gpgpu.renderUniforms.colors.value = gpgpu.matrixColorTexture;
     gpgpu.renderUniforms.sizes.value = gpgpu.matrixSizeTexture;
+    
+    // Set simulation uniforms to use render target textures
+    gpgpu.simulationUniforms.positions.value = gpgpu.positionTargets[0].texture;
+    gpgpu.simulationUniforms.velocities.value = gpgpu.velocityTargets[0].texture;
 }
 
 // Mouse interaction
