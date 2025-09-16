@@ -1,32 +1,32 @@
-// Configuration (conservative adjustments only)
+// Configuration (enhanced for better visual quality)
 const config = {
-    particleSize: 0.8,
-    mouseRadius: 50,
-    mouseStrength: 200,
-    morphSpeed: 0.05,
+    particleSize: 1.2,  // Increased for better visibility
+    mouseRadius: 60,
+    mouseStrength: 250,
+    morphSpeed: 0.04,   // Slightly slower for smoother transition
 
-    // Conservative delta scale (slightly larger than before, not huge)
-    deltaLogoScale: 0.05,    // small increase from 0.025 to avoid bottom clipping
-    deltaColorBoost: 1.05,   // slight color boost only
-    deltaZSpread: 0.2,       // preserve original shallow depth
-    deltaYOffset: 1.5,       // small upward nudge to avoid bottom cut-off
+    // Enhanced delta scale for better visual appearance
+    deltaLogoScale: 0.06,
+    deltaColorBoost: 1.1,
+    deltaZSpread: 0.3,
+    deltaYOffset: 1.8,
 
-    // Keep matrix values as they were to avoid breaking layout
-    matrixLogoScale: 0.172,
+    // Enhanced matrix values
+    matrixLogoScale: 0.18,
     matrixYOffset: 0,
 
-    // Preserve camera-related factor used elsewhere
     cameraZoomFactor: 1.5,
-
     textureSize: 256,
 
-    // Flocking parameters (unchanged)
-    separationDistance: 20.0,
-    alignmentDistance: 20.0,
-    cohesionDistance: 20.0,
-    freedomFactor: 0.75,
-    bounds: 100,
-    speedLimit: 9.0
+    // Enhanced flocking parameters for smoother behavior
+    separationDistance: 15.0,
+    alignmentDistance: 25.0,
+    cohesionDistance: 30.0,
+    freedomFactor: 0.85,
+    bounds: 120,
+    speedLimit: 8.0,
+    flockingIntensity: 0.7,
+    neighborSampleCount: 9  // 3x3 grid for sampling
 };
 config.particleCount = config.textureSize * config.textureSize;
 
@@ -40,12 +40,20 @@ let targetPositions = null;
 // Three.js setup
 const scene = new THREE.Scene();
 scene.background = new THREE.Color(0xffffff);
+scene.fog = new THREE.Fog(0xffffff, 70, 120); // Add subtle fog for depth
 
 const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
 const renderer = new THREE.WebGLRenderer({ antialias: true });
 renderer.setSize(window.innerWidth, window.innerHeight);
-renderer.setPixelRatio(window.devicePixelRatio);
+renderer.setPixelRatio(Math.min(2, window.devicePixelRatio)); // Limit pixel ratio for performance
 document.body.appendChild(renderer.domElement);
+
+// Add subtle lighting
+const ambientLight = new THREE.AmbientLight(0xffffff, 0.6);
+scene.add(ambientLight);
+const directionalLight = new THREE.DirectionalLight(0xffffff, 0.4);
+directionalLight.position.set(1, 1, 1);
+scene.add(directionalLight);
 
 // GPGPU Setup
 const gpgpu = {
@@ -73,13 +81,18 @@ const gpgpu = {
         freedomFactor: { value: config.freedomFactor },
         bounds: { value: config.bounds },
         speedLimit: { value: config.speedLimit },
-        time: { value: 0 }
+        flockingIntensity: { value: config.flockingIntensity },
+        time: { value: 0 },
+        neighborSampleCount: { value: config.neighborSampleCount }
     },
     renderUniforms: {
         positions: { value: null },
         colors: { value: null },
         sizes: { value: null },
-        particleSize: { value: config.particleSize }
+        particleSize: { value: config.particleSize },
+        fogColor: { value: new THREE.Color(0xffffff) },
+        fogNear: { value: 70 },
+        fogFar: { value: 120 }
     }
 };
 
@@ -166,6 +179,8 @@ function initGPGPU() {
     gpgpu.simulationUniforms.freedomFactor.value = config.freedomFactor;
     gpgpu.simulationUniforms.bounds.value = config.bounds;
     gpgpu.simulationUniforms.speedLimit.value = config.speedLimit;
+    gpgpu.simulationUniforms.flockingIntensity.value = config.flockingIntensity;
+    gpgpu.simulationUniforms.neighborSampleCount.value = config.neighborSampleCount;
     
     // Simulation materials
     gpgpu.velocityMaterial = new THREE.ShaderMaterial({
@@ -192,7 +207,8 @@ function initGPGPU() {
         vertexShader: renderVertexShader,
         fragmentShader: renderFragmentShader,
         transparent: true,
-        blending: THREE.NormalBlending
+        blending: THREE.NormalBlending,
+        fog: true
     });
     
     // Create particle system
@@ -228,7 +244,7 @@ const simulationVertexShader = `
     }
 `;
 
-// Updated Velocity shader with flocking behavior
+// Enhanced Velocity shader with improved flocking behavior
 const velocityFragmentShader = `
     precision highp float;
 
@@ -253,19 +269,15 @@ const velocityFragmentShader = `
     uniform float freedomFactor;
     uniform float bounds;
     uniform float speedLimit;
+    uniform float flockingIntensity;
     uniform float time;
+    uniform float neighborSampleCount;
 
     varying vec2 vUv;
 
     const float PI = 3.141592653589793;
     const float PI_2 = PI * 2.0;
     const float textureSize = ${config.textureSize.toFixed(1)};
-
-    float zoneRadius = 40.0;
-    float zoneRadiusSquared = 1600.0;
-
-    float separationThresh = 0.45;
-    float alignmentThresh = 0.65;
 
     float rand( vec2 co ) {
         return fract( sin( dot( co.xy, vec2(12.9898,78.233) ) ) * 43758.5453 );
@@ -280,92 +292,116 @@ const velocityFragmentShader = `
         vec3 homePos   = texture2D(originalPositions, vUv).xyz;
         vec3 targetPos = isMorphing ? texture2D(targetPositions, vUv).xyz : homePos;
 
-        // Morph easing (staggered)
+        // Morph easing (staggered with smooth curve)
         float t = clamp(morphProgress / 3.0, 0.0, 1.0);
-        float delay = fract(sin(dot(vUv, vec2(91.345, 47.853))) * 43758.5453) * 0.5;
-        float particleT = clamp((t - delay) / (1. - delay), 0.0, 1.0);
-        float easedT = particleT * particleT * (3.0 - 2.0 * particleT);
+        float delay = fract(sin(dot(vUv, vec2(91.345, 47.853))) * 43758.5453) * 0.7;
+        float particleT = clamp((t - delay) / (1.0 - delay), 0.0, 1.0);
+        float easedT = smoothstep(0.0, 1.0, particleT);
 
         // Attraction toward target (strong when morphing), or gentle settle to home when idle
         vec3 desire = (isMorphing ? targetPos : homePos) - pos;
-        float attractStrength = isMorphing ? (0.9 * easedT + 0.1) : 0.05;
-        vel += desire * attractStrength;
+        float attractStrength = isMorphing ? (0.8 * easedT + 0.2) : 0.08;
+        vel += desire * attractStrength * deltaTime * 10.0;
 
         // Mouse repulsion only when not morphing and not idle-locked
         if (!isMorphing && !isIdle) {
             float distToMouse = distance(pos, mousePosition);
             if (distToMouse < mouseRadius) {
                 vec3 dir = normalize(pos - mousePosition);
-                float force = (mouseRadius - distToMouse) / mouseRadius * mouseStrength;
-                vel += dir * force;
+                float force = (1.0 - smoothstep(0.0, mouseRadius, distToMouse)) * mouseStrength;
+                vel += dir * force * deltaTime;
             }
         }
 
         // Flocking behavior during morph
-        if (isFlocking && isMorphing && particleT > 0.2 && particleT < 0.8) {
-            zoneRadius = separationDistance + alignmentDistance + cohesionDistance;
-            separationThresh = separationDistance / zoneRadius;
-            alignmentThresh = ( separationDistance + alignmentDistance ) / zoneRadius;
-            zoneRadiusSquared = zoneRadius * zoneRadius;
+        if (isFlocking && isMorphing && particleT > 0.1 && particleT < 0.9) {
+            float zoneRadius = separationDistance + alignmentDistance + cohesionDistance;
+            float separationThresh = separationDistance / zoneRadius;
+            float alignmentThresh = ( separationDistance + alignmentDistance ) / zoneRadius;
+            float zoneRadiusSquared = zoneRadius * zoneRadius;
 
-            // Apply bounds
-            if (length(pos) > bounds) {
-                vel -= normalize(pos) * deltaTime * 5.0;
+            // Apply bounds with soft edge
+            float distToCenter = length(pos);
+            if (distToCenter > bounds * 0.8) {
+                float edgeFactor = smoothstep(bounds * 0.8, bounds, distToCenter);
+                vel -= normalize(pos) * deltaTime * 8.0 * edgeFactor;
             }
 
-            // Sample neighboring particles (optimized - only sample a few)
-            for (float i = 0.0; i < 16.0; i += 1.0) {
-                float x = mod(i, 4.0);
-                float y = floor(i / 4.0);
-                vec2 ref = vUv + vec2((x - 1.5) / textureSize, (y - 1.5) / textureSize);
-                
-                // Skip self and out of bounds
-                if (distance(ref, vUv) < 0.001 || 
-                    ref.x < 0.0 || ref.x > 1.0 || ref.y < 0.0 || ref.y > 1.0) continue;
-                
-                vec3 otherPos = texture2D(positions, ref).xyz;
-                vec3 otherVel = texture2D(velocities, ref).xyz;
-                
-                vec3 dir = otherPos - pos;
-                float dist = length(dir);
-                
-                if (dist < 0.0001) continue;
-                
-                float distSquared = dist * dist;
-                
-                if (distSquared > zoneRadiusSquared) continue;
-                
-                float percent = distSquared / zoneRadiusSquared;
-                
-                // Separation
-                if (percent < separationThresh) {
-                    float f = (separationThresh / percent - 1.0) * deltaTime;
-                    vel -= normalize(dir) * f;
-                } 
-                // Alignment
-                else if (percent < alignmentThresh) {
-                    float threshDelta = alignmentThresh - separationThresh;
-                    float adjustedPercent = (percent - separationThresh) / threshDelta;
-                    float f = (0.5 - cos(adjustedPercent * PI_2) * 0.5 + 0.5) * deltaTime;
-                    vel += normalize(otherVel) * f;
-                } 
-                // Cohesion
-                else {
-                    float threshDelta = 1.0 - alignmentThresh;
-                    float adjustedPercent = (threshDelta == 0.0) ? 1.0 : (percent - alignmentThresh) / threshDelta;
-                    float f = (0.5 - (cos(adjustedPercent * PI_2) * -0.5 + 0.5)) * deltaTime;
-                    vel += normalize(dir) * f;
+            // Sample neighboring particles in a grid pattern
+            float sampleCount = floor(sqrt(neighborSampleCount));
+            float sampleStep = 1.0 / sampleCount;
+            
+            vec3 separationForce = vec3(0.0);
+            vec3 alignmentForce = vec3(0.0);
+            vec3 cohesionForce = vec3(0.0);
+            int separationCount = 0;
+            int alignmentCount = 0;
+            int cohesionCount = 0;
+            
+            for (float y = 0.0; y < sampleCount; y += 1.0) {
+                for (float x = 0.0; x < sampleCount; x += 1.0) {
+                    // Skip center sample (self)
+                    if (x == floor(sampleCount/2.0) && y == floor(sampleCount/2.0)) continue;
+                    
+                    vec2 ref = vUv + vec2((x - sampleCount/2.0) * sampleStep / textureSize, 
+                                         (y - sampleCount/2.0) * sampleStep / textureSize);
+                    
+                    // Skip out of bounds
+                    if (ref.x < 0.0 || ref.x > 1.0 || ref.y < 0.0 || ref.y > 1.0) continue;
+                    
+                    vec3 otherPos = texture2D(positions, ref).xyz;
+                    vec3 otherVel = texture2D(velocities, ref).xyz;
+                    
+                    vec3 dir = otherPos - pos;
+                    float dist = length(dir);
+                    
+                    if (dist < 0.0001) continue;
+                    
+                    float distSquared = dist * dist;
+                    
+                    if (distSquared > zoneRadiusSquared) continue;
+                    
+                    float percent = distSquared / zoneRadiusSquared;
+                    
+                    // Separation
+                    if (percent < separationThresh) {
+                        separationForce -= normalize(dir) * (1.0 - percent/separationThresh);
+                        separationCount++;
+                    } 
+                    // Alignment
+                    else if (percent < alignmentThresh) {
+                        alignmentForce += normalize(otherVel);
+                        alignmentCount++;
+                    } 
+                    // Cohesion
+                    else {
+                        cohesionForce += normalize(dir);
+                        cohesionCount++;
+                    }
                 }
             }
+            
+            // Apply flocking forces with intensity control
+            if (separationCount > 0) {
+                vel += separationForce * deltaTime * 5.0 * flockingIntensity;
+            }
+            if (alignmentCount > 0) {
+                vel += (alignmentForce / float(alignmentCount)) * deltaTime * 3.0 * flockingIntensity;
+            }
+            if (cohesionCount > 0) {
+                vel += (cohesionForce / float(cohesionCount)) * deltaTime * 2.0 * flockingIntensity;
+            }
 
-            // Speed limit
-            if (length(vel) > speedLimit) {
-                vel = normalize(vel) * speedLimit;
+            // Speed limit with smooth transition
+            float currentSpeed = length(vel);
+            if (currentSpeed > speedLimit) {
+                vel = normalize(vel) * mix(currentSpeed, speedLimit, 0.2);
             }
         }
 
-        // Damping
-        vel *= 0.90;
+        // Damping with variable rate based on state
+        float damping = isMorphing ? 0.92 : 0.96;
+        vel *= damping;
 
         gl_FragColor = vec4(vel, maxLife);
     }
@@ -404,9 +440,13 @@ const renderVertexShader = `
     uniform sampler2D colors;
     uniform sampler2D sizes;
     uniform float particleSize;
+    uniform float fogNear;
+    uniform float fogFar;
+    uniform vec3 fogColor;
 
     varying vec4 vColor;
     varying float vSize;
+    varying float vFogDepth;
 
     void main() {
         vec4 positionData = texture2D(positions, uv);
@@ -422,6 +462,7 @@ const renderVertexShader = `
         vColor.a = clamp(life, 0.0, 1.0);
 
         vec4 mvPosition = modelViewMatrix * vec4(pos, 1.0);
+        vFogDepth = -mvPosition.z;
         gl_PointSize = vSize * (300.0 / -mvPosition.z);
         gl_Position = projectionMatrix * mvPosition;
     }
@@ -430,15 +471,31 @@ const renderVertexShader = `
 const renderFragmentShader = `
     precision highp float;
 
+    uniform float fogNear;
+    uniform float fogFar;
+    uniform vec3 fogColor;
+
     varying vec4 vColor;
     varying float vSize;
+    varying float vFogDepth;
 
     void main() {
-        gl_FragColor = vColor;
+        vec4 color = vColor;
+        
+        // Circular point with soft edge
         vec2 coord = gl_PointCoord - vec2(0.5);
-        if (length(coord) > 0.5) {
-            discard;
-        }
+        float dist = length(coord);
+        float alpha = 1.0 - smoothstep(0.35, 0.5, dist);
+        
+        if (alpha < 0.01) discard;
+        
+        color.a *= alpha;
+        
+        // Apply fog
+        float fogFactor = smoothstep(fogNear, fogFar, vFogDepth);
+        color.rgb = mix(color.rgb, fogColor, fogFactor);
+        
+        gl_FragColor = color;
     }
 `;
 
@@ -457,7 +514,7 @@ function loadImageData(url) {
 
             canvas.width = img.width;
             canvas.height = img.height;
-            context.drawImage(img, 0, 0, img.width, img.height);
+            context.drawImage(img, 0, 0, canvas.width, canvas.height);
 
             const imageData = context.getImageData(0, 0, canvas.width, canvas.height);
             resolve({
@@ -477,17 +534,17 @@ function processLogoData(data, logoType) {
     const scale = logoType === 'matrix' ? config.matrixLogoScale : config.deltaLogoScale;
     const zSpread = logoType === 'matrix' ? 5 : config.deltaZSpread;
 
-    // Sample every 2 pixels (keeps density reasonable)
-    for (let y = 0; y < data.height; y += 2) {
-        for (let x = 0; x < data.width; x += 2) {
+    // Sample every pixel for better logo definition
+    for (let y = 0; y < data.height; y += 1) {
+        for (let x = 0; x < data.width; x += 1) {
             const index = (y * data.width + x) * 4;
             const r = dataArray[index];
             const g = dataArray[index + 1];
             const b = dataArray[index + 2];
             const a = dataArray[index + 3];
 
-            // Skip transparent/near-white pixels
-            if (a <= 10 || (r > 250 && g > 250 && b > 250)) continue;
+            // Skip transparent/near-white pixels with a more precise threshold
+            if (a <= 20 || (r > 240 && g > 240 && b > 240)) continue;
 
             let normalizedR = r / 255;
             let normalizedG = g / 255;
@@ -499,14 +556,14 @@ function processLogoData(data, logoType) {
                 normalizedB = Math.min(normalizedB * config.deltaColorBoost, 1.0);
             }
 
-            // Use scale directly (no widthRatio distortion)
-            const jitter = 0.05; // small jitter for crispness
+            // Use scale directly with reduced jitter for cleaner logo appearance
+            const jitter = 0.02; // reduced jitter for crisper logo
             const px = ((x - data.width / 2) + (Math.random() - 0.5) * jitter) * scale;
             const py = ((data.height / 2 - y) + (Math.random() - 0.5) * jitter) * scale
                        + (logoType === 'delta' ? config.deltaYOffset : config.matrixYOffset);
 
-            // Keep z = 0 for compatibility with existing simulation unless you want depth
-            const pz = 0;
+            // Add slight depth variation for more interesting visuals
+            const pz = (Math.random() - 0.5) * zSpread;
 
             points.push({
                 x: px,
@@ -516,8 +573,8 @@ function processLogoData(data, logoType) {
                 g: normalizedG,
                 b: normalizedB,
                 size: logoType === 'matrix'
-                    ? 0.8 + (1 - (normalizedR + normalizedG + normalizedB) / 3) * 0.4
-                    : 1.0
+                    ? 0.9 + (1 - (normalizedR + normalizedG + normalizedB) / 3) * 0.3
+                    : 1.1
             });
         }
     }
@@ -527,32 +584,22 @@ function processLogoData(data, logoType) {
     const colorArray = new Float32Array(size * size * 4);
     const sizeArray = new Float32Array(size * size * 4);
 
-    const step = Math.max(1, Math.floor(points.length / config.particleCount));
-
+    // Fill the texture with particles, repeating if needed
     for (let i = 0; i < config.particleCount; i++) {
-        const pointIndex = Math.min(i * step, points.length - 1);
+        const pointIndex = i % points.length;
         const point = points[pointIndex];
 
-        // Fallback if points array is empty (defensive)
-        const px = point ? point.x : 0;
-        const py = point ? point.y : 0;
-        const pz = point ? point.z : 0;
-        const pr = point ? point.r : 0;
-        const pg = point ? point.g : 0;
-        const pb = point ? point.b : 0;
-        const psz = point ? point.size : 1.0;
-
-        positionArray[i * 4] = px;
-        positionArray[i * 4 + 1] = py;
-        positionArray[i * 4 + 2] = pz;
+        positionArray[i * 4] = point.x;
+        positionArray[i * 4 + 1] = point.y;
+        positionArray[i * 4 + 2] = point.z;
         positionArray[i * 4 + 3] = 1.0;
 
-        colorArray[i * 4] = pr;
-        colorArray[i * 4 + 1] = pg;
-        colorArray[i * 4 + 2] = pb;
+        colorArray[i * 4] = point.r;
+        colorArray[i * 4 + 1] = point.g;
+        colorArray[i * 4 + 2] = point.b;
         colorArray[i * 4 + 3] = 1.0;
 
-        sizeArray[i * 4] = psz;
+        sizeArray[i * 4] = point.size;
     }
 
     const positionTexture = createDataTexture(size, positionArray);
@@ -691,7 +738,7 @@ let currentVelocityTarget = 0;
 function animate() {
     requestAnimationFrame(animate);
 
-    const deltaTime = clock.getDelta();
+    const deltaTime = Math.min(clock.getDelta(), 0.033); // Cap at 30fps for consistency
 
     // === Update shared uniforms ===
     gpgpu.simulationUniforms.deltaTime.value = deltaTime;
