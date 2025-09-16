@@ -820,4 +820,171 @@ function startMorph() {
     gpgpu.simulationUniforms.targetPositions.value =
         currentLogo === 'matrix'
             ? gpgpu.matrixPositionTexture
-            : gpgpu
+            : gpgpu.deltaPositionTexture;
+
+    // Update render textures (for color and size)
+    if (currentLogo === 'matrix') {
+        gpgpu.renderUniforms.colors.value = gpgpu.deltaColorTexture;
+        gpgpu.renderUniforms.targetColors.value = gpgpu.matrixColorTexture;
+        gpgpu.renderUniforms.sizes.value = gpgpu.deltaSizeTexture;
+    } else {
+        gpgpu.renderUniforms.colors.value = gpgpu.matrixColorTexture;
+        gpgpu.renderUniforms.targetColors.value = gpgpu.deltaColorTexture;
+        gpgpu.renderUniforms.sizes.value = gpgpu.matrixSizeTexture;
+    }
+
+    // Update button text
+    document.getElementById('toggleLogo').textContent = 
+        `Switch to ${currentLogo === 'matrix' ? 'Delta' : 'Matrix'} Logo`;
+
+    // Disable mouse interaction during morph
+    gpgpu.simulationUniforms.mousePosition.value.set(-1000, -1000, -1000);
+}
+
+window.addEventListener('click', startMorph);
+
+// UI event handlers
+document.getElementById('toggleLogo').addEventListener('click', startMorph);
+
+document.getElementById('toggleFlocking').addEventListener('click', function() {
+    isFlocking = !isFlocking;
+    gpgpu.simulationUniforms.isFlocking.value = isFlocking;
+    this.textContent = isFlocking ? 'Disable Flocking' : 'Enable Flocking';
+});
+
+// Auto-timer for morphing (every 15 seconds)
+setInterval(() => {
+    if (isIdle && !isMorphing) {
+        startMorph();
+    }
+}, 15000);
+
+// Animation loop
+const clock = new THREE.Clock();
+let currentPositionTarget = 0;
+let currentVelocityTarget = 0;
+
+function animate() {
+    requestAnimationFrame(animate);
+
+    const deltaTime = Math.min(clock.getDelta(), 0.033); // Cap at 30fps for consistency
+
+    // === Update shared uniforms ===
+    gpgpu.simulationUniforms.deltaTime.value = deltaTime;
+    gpgpu.simulationUniforms.time.value += deltaTime;
+
+    // Update flocking progress if morphing
+    if (isMorphing) {
+        const currentTime = performance.now() / 1000;
+        flockingProgress = (currentTime - flockingStartTime) / config.flockingDuration;
+        gpgpu.simulationUniforms.flockingProgress.value = flockingProgress;
+        
+        // Update color blend based on flocking progress
+        const colorBlend = smoothstep(config.colorTransitionStart, config.colorTransitionEnd, flockingProgress);
+        gpgpu.renderUniforms.colorBlend.value = colorBlend;
+    }
+
+    // Mouse only when not morphing and idle "interaction mode" is on
+    if (!isMorphing && isIdle) {
+        gpgpu.simulationUniforms.mousePosition.value.copy(mouseWorldPos);
+    } else {
+        gpgpu.simulationUniforms.mousePosition.value.set(-1000, -1000, -1000);
+    }
+
+    // === Ping-pong ===
+    const nextPositionTarget = 1 - currentPositionTarget;
+    const nextVelocityTarget = 1 - currentVelocityTarget;
+
+    // -------- Pass 1: Velocity update --------
+    gpgpu.simulationUniforms.positions.value  = gpgpu.positionTargets[currentPositionTarget].texture;
+    gpgpu.simulationUniforms.velocities.value = gpgpu.velocityTargets[currentVelocityTarget].texture;
+    gpgpu.simulationMesh.material = gpgpu.velocityMaterial;
+
+    renderer.setRenderTarget(gpgpu.velocityTargets[nextVelocityTarget]);
+    renderer.render(gpgpu.simulationScene, gpgpu.simulationCamera);
+
+    // -------- Pass 2: Position integrate --------
+    gpgpu.simulationUniforms.positions.value  = gpgpu.positionTargets[currentPositionTarget].texture;
+    gpgpu.simulationUniforms.velocities.value = gpgpu.velocityTargets[nextVelocityTarget].texture;
+    gpgpu.simulationMesh.material = gpgpu.positionMaterial;
+
+    renderer.setRenderTarget(gpgpu.positionTargets[nextPositionTarget]);
+    renderer.render(gpgpu.simulationScene, gpgpu.simulationCamera);
+
+    // Reset render target
+    renderer.setRenderTarget(null);
+
+    // === Set updated texture for rendering pass ===
+    gpgpu.renderUniforms.positions.value = gpgpu.positionTargets[nextPositionTarget].texture;
+
+    // === Render the particle system ===
+    renderer.render(scene, camera);
+
+    // === Swap ping-pong buffers ===
+    currentPositionTarget = nextPositionTarget;
+    currentVelocityTarget = nextVelocityTarget;
+
+    // === Morph progression logic ===
+    if (isMorphing && flockingProgress >= 1.0) {
+        // Morph complete — lock into final logo
+        isMorphing = false;
+        isIdle = true;
+        isFlocking = false;
+
+        gpgpu.simulationUniforms.isMorphing.value = false;
+        gpgpu.simulationUniforms.isIdle.value = true;
+        gpgpu.simulationUniforms.isFlocking.value = false;
+
+        // Now that morph is done, set new home position
+        gpgpu.simulationUniforms.originalPositions.value =
+            currentLogo === 'matrix'
+                ? gpgpu.matrixPositionTexture
+                : gpgpu.deltaPositionTexture;
+
+        // Update render colors to match the new logo
+        gpgpu.renderUniforms.colors.value =
+            currentLogo === 'matrix'
+                ? gpgpu.matrixColorTexture
+                : gpgpu.deltaColorTexture;
+                
+        gpgpu.renderUniforms.sizes.value =
+            currentLogo === 'matrix'
+                ? gpgpu.matrixSizeTexture
+                : gpgpu.deltaSizeTexture;
+                
+        gpgpu.renderUniforms.colorBlend.value = 0;
+
+        // Clear target
+        gpgpu.simulationUniforms.targetPositions.value = null;
+    }
+}
+
+// Handle window resize
+window.addEventListener('resize', () => {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+});
+
+// Smoothstep function for easing
+function smoothstep(edge0, edge1, x) {
+    x = clamp((x - edge0) / (edge1 - edge0), 0.0, 1.0);
+    return x * x * (3.0 - 2.0 * x);
+}
+
+function clamp(x, minVal, maxVal) {
+    return min(max(x, minVal), maxVal);
+}
+
+// Start the application
+Promise.all([
+    loadImageData('./Matrix_CMYK_Logo.png'),
+    loadImageData('./Delta_Logo.png')
+]).then(([matrixData, deltaData]) => {
+    initGPGPU();
+    initParticles(matrixData, deltaData);
+    positionCamera(); 
+    animate();
+}).catch(error => {
+    console.error("Error loading images:", error);
+});
