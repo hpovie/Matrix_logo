@@ -57,4 +57,3 @@ A **Three.js GPGPU particle system** where particles:
 | Windows | Chrome/Edge | ✅ |
 | macOS | Chrome/Edge | ✅ |
 | Linux | Chrome  | ✅ |
-| Hiram's crap laptop | Every browser | ❌ |
